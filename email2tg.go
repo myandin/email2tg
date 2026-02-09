@@ -53,7 +53,6 @@ type mediaGroup struct {
     Timer    *time.Timer
 }
 
-// safeLog выводит логи, маскируя токен бота
 func safeLog(level, format string, v ...interface{}) {
     msg := fmt.Sprintf(format, v...)
     if cfg.TgToken != "" {
@@ -69,8 +68,7 @@ func loadConfig(path string) error {
     return json.NewDecoder(file).Decode(&cfg)
 }
 
-// --- AUTH LOGIC ---
-
+// --- AUTH ---
 type ntlmBase struct {
     user, password, domain string
     step                  int
@@ -125,35 +123,25 @@ func smtpSend(e *email.Email) error {
     return e.Send(addr, auth)
 }
 
-// --- MAIN ---
-
 func main() {
-    configPath := flag.String("config", "config.json", "Path to config file")
+    configPath := flag.String("config", "config.json", "Path to config")
     flag.Parse()
-
     if err := loadConfig(*configPath); err != nil {
-	log.Fatalf("[FATAL] Ошибка конфига: %v", err)
+	log.Fatalf("[FATAL] Config error: %v", err)
     }
-
     bot, err := tgbotapi.NewBotAPI(cfg.TgToken)
     if err != nil {
-	// Маскируем токен даже в фатальной ошибке при старте
 	cleanErr := strings.ReplaceAll(err.Error(), cfg.TgToken, "[HIDDEN_TOKEN]")
 	log.Fatalf("[FATAL] Telegram Error: %s", cleanErr)
     }
-
     safeLog("SYSTEM", "Email2Tg запущен: %s (Метод: %s)", bot.Self.UserName, cfg.AuthType)
-
     go emailToTgLoop(bot)
-
     u := tgbotapi.NewUpdate(0)
     u.Timeout = 60
     updates := bot.GetUpdatesChan(u)
-
     for update := range updates {
 	if update.Message == nil || update.Message.From.ID != cfg.MyTelegramID { continue }
 	msg := update.Message
-
 	if msg.IsCommand() {
 	    switch msg.Command() {
 	    case "start", "help": sendHelp(bot, msg.Chat.ID)
@@ -161,7 +149,6 @@ func main() {
 	    }
 	    continue
 	}
-
 	if msg.MediaGroupID != "" {
 	    bufferMutex.Lock()
 	    group, exists := mediaBuffer[msg.MediaGroupID]
@@ -180,28 +167,20 @@ func main() {
 }
 
 func sendHelp(bot *tgbotapi.BotAPI, chatID int64) {
-    text := "📧 <b>Email2Tg</b>\n\n1. <b>Reply:</b> ответ на письмо.\n2. <b>email: текст:</b> новое письмо.\n3. <b>/status:</b> проверка систем."
-    m := tgbotapi.NewMessage(chatID, text)
-    m.ParseMode = "HTML"
-    bot.Send(m)
+    bot.Send(tgbotapi.NewMessage(chatID, "📧 <b>Email2Tg</b>\n1. Reply: ответ.\n2. email: текст: новое.\n/status: проверка."))
 }
 
 func sendStatus(bot *tgbotapi.BotAPI, chatID int64) {
     m, _ := bot.Send(tgbotapi.NewMessage(chatID, "⏳ Проверка..."))
     imapSt, smtpSt := "✅ OK", "✅ OK"
-
     c, err := client.DialTLS(cfg.ImapServer, &tls.Config{MinVersion: tls.VersionTLS12})
-    if err != nil { 
-	imapSt = "❌ Сеть" 
-    } else {
+    if err != nil { imapSt = "❌ Сеть" } else {
 	if err := imapAuth(c); err != nil { imapSt = "❌ Auth" }
 	c.Logout()
     }
-
     conn, err := net.DialTimeout("tcp", net.JoinHostPort(cfg.SmtpHost, cfg.SmtpPort), 5*time.Second)
     if err != nil { smtpSt = "❌ Порт" } else { conn.Close() }
-
-    res := fmt.Sprintf("📊 <b>Статус</b>\n📥 IMAP: %s\n📤 SMTP: %s\n⚙️ Метод: %s", imapSt, smtpSt, cfg.AuthType)
+    res := fmt.Sprintf("📊 <b>Статус</b>\n📥 IMAP: %s\n📤 SMTP: %s", imapSt, smtpSt)
     bot.Send(tgbotapi.NewEditMessageText(chatID, m.MessageID, res))
 }
 
@@ -209,7 +188,6 @@ func handleTgToEmail(bot *tgbotapi.BotAPI, msgs []*tgbotapi.Message) {
     mainMsg := msgs[0]
     var targetEmail, targetSub, inReplyTo, bodyText string
     var bodyParts []string
-
     for _, m := range msgs {
 	t := m.Text
 	if t == "" { t = m.Caption }
@@ -217,7 +195,6 @@ func handleTgToEmail(bot *tgbotapi.BotAPI, msgs []*tgbotapi.Message) {
     }
     bodyText = strings.Join(bodyParts, "\n")
     if bodyText == "" && mainMsg.Document == nil && len(mainMsg.Photo) == 0 { return }
-
     if mainMsg.ReplyToMessage != nil {
 	orig := mainMsg.ReplyToMessage.Text
 	if orig == "" { orig = mainMsg.ReplyToMessage.Caption }
@@ -231,7 +208,6 @@ func handleTgToEmail(bot *tgbotapi.BotAPI, msgs []*tgbotapi.Message) {
 	}
 	bodyText = fmt.Sprintf("%s\n\n--- Original ---\n%s", bodyText, orig)
     }
-
     if targetEmail == "" {
 	pts := strings.SplitN(bodyText, ":", 2)
 	if len(pts) == 2 && strings.Contains(pts[0], "@") {
@@ -241,13 +217,10 @@ func handleTgToEmail(bot *tgbotapi.BotAPI, msgs []*tgbotapi.Message) {
 	    return
 	}
     }
-
     if targetSub != "" && !strings.HasPrefix(strings.ToLower(targetSub), "re:") { targetSub = "Re: " + targetSub }
-
     e := email.NewEmail()
     e.From, e.To, e.Subject, e.Text = cfg.EmailUser, []string{targetEmail}, targetSub, []byte(bodyText)
     if inReplyTo != "" { e.Headers.Set("In-Reply-To", inReplyTo); e.Headers.Set("References", inReplyTo) }
-
     for _, m := range msgs {
 	var fID, fName string
 	if m.Document != nil { fID, fName = m.Document.FileID, m.Document.FileName
@@ -261,7 +234,6 @@ func handleTgToEmail(bot *tgbotapi.BotAPI, msgs []*tgbotapi.Message) {
 	    }
 	}
     }
-
     if err := smtpSend(e); err == nil {
 	bot.Send(tgbotapi.NewMessage(mainMsg.Chat.ID, "✅ Отправлено"))
 	go tryAppendSent(e)
@@ -298,9 +270,15 @@ func pollEmails(bot *tgbotapi.BotAPI) error {
     defer c.Logout()
     if err := imapAuth(c); err != nil { return err }
     if _, err := c.Select("INBOX", false); err != nil { return err }
-    ids, _ := c.Search(imap.NewSearchCriteria().WithoutFlags = []string{imap.SeenFlag})
-    if len(ids) == 0 { return nil }
-    seq := new(imap.SeqSet); seq.AddNum(ids...)
+
+    // ИСПРАВЛЕННЫЙ БЛОК ПОИСКА
+    criteria := imap.NewSearchCriteria()
+    criteria.WithoutFlags = []string{imap.SeenFlag}
+    ids, err := c.Search(criteria)
+    if err != nil || len(ids) == 0 { return err }
+
+    seq := new(imap.SeqSet)
+    seq.AddNum(ids...)
     msgs := make(chan *imap.Message, 10)
     go c.Fetch(seq, []imap.FetchItem{imap.FetchEnvelope, (&imap.BodySectionName{}).FetchItem()}, msgs)
     for m := range msgs { processEmailToTg(m, bot, c, seq) }
